@@ -4,8 +4,8 @@ import struct
 import time
 
 # --- КОНФИГУРАЦИЯ ---
-REMOTE_RELAY = "64.188.65.59"
-REMOTE_PORT = 59999
+REMOTE_RELAY = "89.144.32.194"
+REMOTE_PORT = 10398
 SECRET_KEY = "3F4W6f27iIIUaD91u3jGI16uL4sudZ1uykuhzFOmlAc"  # Ключ для авторизации туннеля (между нодой и реле)
 
 # Данные для конечного пользователя (логин/пароль для вашего браузера или бота)
