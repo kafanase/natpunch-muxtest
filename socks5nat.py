@@ -7,7 +7,7 @@ import select
 from collections import deque
 
 # --- КОНФИГУРАЦИЯ ---
-REMOTE_RELAY = "64.188.65.59"
+REMOTE_RELAY = "89.144.32.194"
 REMOTE_PORT = 10398  # ИЗМЕНЕНО: порт должен совпадать с сервером!
 SECRET_KEY = "3F4W6f27iIIUaD91u3jGI16uL4sudZ1uykuhzFOmlAc"
 
