@@ -32,6 +32,7 @@ class TunnelPool:
             if len(self.pool) < self.max_size:
                 self.pool.append((conn, addr, time.time()))
                 self.active_count += 1
+                logger.info(f"[+] Tunnel added from {addr}. Pool size: {self.active_count}")
                 return True
             return False
     
@@ -41,12 +42,15 @@ class TunnelPool:
             while self.pool:
                 conn, addr, _ = self.pool[0]
                 if self._is_alive(conn):
-                    self.pool.popleft()
+                    result_conn, result_addr = self.pool.popleft()
                     self.active_count -= 1
-                    return conn, addr
+                    return result_conn, result_addr
                 else:
-                    self.pool.popleft()
+                    logger.debug(f"[-] Removing dead tunnel from {addr}")
+                    dead_conn, dead_addr, _ = self.pool.popleft()
                     self.active_count -= 1
+                    try: dead_conn.close()
+                    except: pass
             return None, None
     
     def _is_alive(self, conn):
@@ -120,8 +124,6 @@ def handle_data_transfer(client_conn, tunnel_conn, pair_id):
                 
             if not readable:
                 # Таймаут - проверяем, живы ли еще соединения
-                if not all(multiplexer._is_alive(s) for s in sockets):
-                    break
                 continue
             
             for sock in readable:
@@ -153,6 +155,8 @@ def handle_data_transfer(client_conn, tunnel_conn, pair_id):
 def handle_tunnel_connection(tunnel_conn, addr):
     """Обработка входящего туннельного соединения"""
     try:
+        logger.info(f"[>>] New connection from {addr[0]}:{addr[1]} (checking if tunnel)")
+        
         # Установка keepalive
         tunnel_conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         tunnel_conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
@@ -163,31 +167,35 @@ def handle_tunnel_connection(tunnel_conn, addr):
         tunnel_conn.settimeout(5.0)
         auth_data = tunnel_conn.recv(1024).decode().strip()
         
+        logger.info(f"[AUTH] Received auth data from {addr[0]}:{addr[1]}: '{auth_data[:20]}...'")
+        
         if auth_data == SECRET_KEY:
             tunnel_conn.settimeout(None)
             if tunnel_pool.add(tunnel_conn, addr):
-                logger.info(f"Tunnel authorized from {addr[0]}:{addr[1]} (pool: {tunnel_pool.size()})")
+                logger.info(f"[+] Tunnel AUTHORIZED from {addr[0]}:{addr[1]} (pool: {tunnel_pool.size()})")
                 return True
             else:
-                logger.warning(f"Tunnel pool full, rejecting {addr}")
+                logger.warning(f"[!] Tunnel pool full, rejecting {addr}")
         else:
-            logger.warning(f"Invalid auth from {addr}")
+            logger.warning(f"[!] Invalid auth from {addr[0]}:{addr[1]}: '{auth_data}'")
             
         tunnel_conn.close()
         return False
         
     except Exception as e:
-        logger.error(f"Tunnel auth error: {e}")
+        logger.error(f"[!] Tunnel auth error for {addr}: {e}")
         try: tunnel_conn.close()
         except: pass
         return False
 
 def handle_client_connection(client_conn, addr):
     """Обработка клиентского SOCKS5 соединения"""
+    logger.info(f"[CLIENT] New client connection from {addr[0]}:{addr[1]}")
+    
     tunnel_conn, tunnel_addr = tunnel_pool.get()
     
     if not tunnel_conn:
-        logger.warning(f"No available tunnels for client {addr}")
+        logger.warning(f"[!] No available tunnels for client {addr[0]}:{addr[1]}. Pool size: {tunnel_pool.size()}")
         try:
             # Отправляем SOCKS5 ошибку
             client_conn.sendall(struct.pack("!BB", 0x05, 0x01))  # General failure
@@ -199,6 +207,8 @@ def handle_client_connection(client_conn, addr):
         return
     
     try:
+        logger.info(f"[PAIR] Pairing client {addr[0]}:{addr[1]} with tunnel from {tunnel_addr}")
+        
         # Создаем пару для мультиплексирования
         pair_id = multiplexer.add_pair(client_conn, tunnel_conn, addr)
         
@@ -210,10 +220,8 @@ def handle_client_connection(client_conn, addr):
         )
         thread.start()
         
-        logger.debug(f"Connection pair created: {addr} -> tunnel {tunnel_addr}")
-        
     except Exception as e:
-        logger.error(f"Error setting up transfer: {e}")
+        logger.error(f"[!] Error setting up transfer for {addr}: {e}")
         try: client_conn.close()
         except: pass
         try: tunnel_conn.close()
@@ -228,11 +236,12 @@ def start_server():
     try:
         server_sock.bind(('0.0.0.0', LISTEN_PORT))
         server_sock.listen(256)
-        logger.info(f"Server started on port {LISTEN_PORT}")
-        logger.info(f"Expected tunnel from Romania: {ROMANIA_IP}")
+        logger.info(f"[SERVER] Started on 0.0.0.0:{LISTEN_PORT}")
+        logger.info(f"[CONFIG] Expected tunnel IP: {ROMANIA_IP}")
+        logger.info(f"[CONFIG] Secret key: {SECRET_KEY[:10]}...")
         
     except Exception as e:
-        logger.error(f"Failed to bind port {LISTEN_PORT}: {e}")
+        logger.error(f"[!] Failed to bind port {LISTEN_PORT}: {e}")
         return
     
     # Запуск мониторинга
@@ -241,9 +250,11 @@ def start_server():
     while True:
         try:
             conn, addr = server_sock.accept()
+            logger.info(f"[CONNECT] Incoming connection from {addr[0]}:{addr[1]}")
             
             # Фильтрация по IP
             if addr[0] == ROMANIA_IP:
+                logger.info(f"[TUNNEL] Detected tunnel connection from Romania IP: {addr[0]}")
                 # Это туннельное соединение из Румынии
                 threading.Thread(
                     target=handle_tunnel_connection,
@@ -251,6 +262,7 @@ def start_server():
                     daemon=True
                 ).start()
             else:
+                logger.info(f"[CLIENT] Detected client connection from: {addr[0]}")
                 # Это клиентское SOCKS5 соединение
                 threading.Thread(
                     target=handle_client_connection,
@@ -259,7 +271,7 @@ def start_server():
                 ).start()
                 
         except Exception as e:
-            logger.error(f"Accept error: {e}")
+            logger.error(f"[!] Accept error: {e}")
             time.sleep(0.1)
 
 def monitor_connections():
@@ -271,20 +283,27 @@ def monitor_connections():
             current_time = time.time()
             if current_time - last_stats_time >= 30:  # Каждые 30 секунд
                 active_pairs, total_bytes = multiplexer.get_stats()
-                logger.info(f"Stats: {tunnel_pool.size()} tunnels, {active_pairs} active connections, "
-                           f"{total_bytes/1024/1024:.2f} MB transferred")
+                pool_size = tunnel_pool.size()
+                logger.info(f"[STATS] Tunnels: {pool_size} | Active pairs: {active_pairs} | Transfer: {total_bytes/1024/1024:.2f} MB")
+                
+                if pool_size == 0:
+                    logger.warning("[WARN] No tunnels available! Waiting for connection from Romania...")
+                    
                 last_stats_time = current_time
                 
             time.sleep(5)
             
         except Exception as e:
-            logger.error(f"Monitor error: {e}")
+            logger.error(f"[!] Monitor error: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("SOCKS5 Relay Server Starting...")
+    logger.info("=" * 60)
     try:
         start_server()
     except KeyboardInterrupt:
-        logger.info("Server stopped")
+        logger.info("[STOP] Server stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"[FATAL] {e}")
